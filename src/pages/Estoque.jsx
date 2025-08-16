@@ -1,13 +1,20 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../services/supabaseClient";
 
+// Nome bonito no frontend
+const prettyName = (n) => {
+  const v = (n || "").toLowerCase();
+  if (v === "gas") return "Gás";
+  if (v === "agua") return "Água";
+  return v.charAt(0).toUpperCase() + v.slice(1);
+};
+
 /**
  * Estoque
  * - Lista saldo atual (view v_stock_summary)
  * - Formulário de entrada de estoque (stock_movements type='in')
- * - (Opcional) lista últimas movimentações
+ * - Lista últimas movimentações (opcional)
  */
-
 export default function Estoque() {
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState([]); // [{product_id, name, quantity}]
@@ -15,7 +22,7 @@ export default function Estoque() {
   const [errorMsg, setErrorMsg] = useState("");
 
   // form de entrada
-  const [productId, setProductId] = useState("");
+  const [productId, setProductId] = useState(""); // começa vazio
   const [products, setProducts] = useState([]); // para popular o select
   const [quantity, setQuantity] = useState("");
   const [unitCost, setUnitCost] = useState("");
@@ -36,7 +43,7 @@ export default function Estoque() {
       .select("id, name")
       .order("name", { ascending: true });
 
-    // últimas movimentações (opcional, só para dar visibilidade)
+    // últimas movimentações
     const { data: mData, error: mErr } = await supabase
       .from("stock_movements")
       .select("id, type, quantity, unit_cost, created_at, product_id, products(name)")
@@ -50,12 +57,6 @@ export default function Estoque() {
     setProducts(pData || []);
     setMovs(mData || []);
     setLoading(false);
-
-    // selecionar produto padrão (gas) se existir
-    if (!productId && (pData?.length || 0) > 0) {
-      const gas = pData.find((p) => p.name === "gas");
-      setProductId((gas || pData[0]).id);
-    }
   };
 
   useEffect(() => {
@@ -72,6 +73,8 @@ export default function Estoque() {
 
     if (!productId) return setErrorMsg("Selecione um produto.");
     if (!q || q <= 0) return setErrorMsg("Informe uma quantidade válida (> 0).");
+    if (cost != null && (Number.isNaN(cost) || cost < 0))
+      return setErrorMsg("Informe um custo unitário válido (>= 0) ou deixe em branco.");
 
     const { error } = await supabase.from("stock_movements").insert([
       {
@@ -88,6 +91,7 @@ export default function Estoque() {
     }
 
     // reset form
+    setProductId("");
     setQuantity("");
     setUnitCost("");
     await carregar();
@@ -110,7 +114,7 @@ export default function Estoque() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {summary.map((row) => (
               <div key={row.product_id} className="bg-white border rounded p-4">
-                <div className="text-sm text-gray-500 capitalize">{row.name}</div>
+                <div className="text-sm text-gray-500">{prettyName(row.name)}</div>
                 <div className="text-2xl font-semibold">{row.quantity || 0} un.</div>
                 {/* barra de nível simples (verde/amar/verm) */}
                 <div className="mt-2 h-2 bg-gray-100 rounded">
@@ -147,11 +151,12 @@ export default function Estoque() {
             className="border rounded px-3 py-2 md:col-span-1"
             value={productId}
             onChange={(e) => setProductId(e.target.value)}
+            required
           >
             <option value="">Selecione o produto</option>
             {products.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name}
+                {prettyName(p.name)}
               </option>
             ))}
           </select>
@@ -182,7 +187,7 @@ export default function Estoque() {
         </form>
       </section>
 
-      {/* Últimas movimentações (opcional) */}
+      {/* Últimas movimentações */}
       <section>
         <h2 className="text-lg font-medium mb-2">Últimas movimentações</h2>
         {movs.length === 0 ? (
@@ -192,8 +197,8 @@ export default function Estoque() {
             {movs.map((m) => (
               <li key={m.id} className="bg-white border rounded p-3 flex items-center justify-between">
                 <div>
-                  <div className="text-sm text-gray-500 capitalize">
-                    {m.products?.name} — {m.type === "in" ? "entrada" : "saída"}
+                  <div className="text-sm text-gray-500">
+                    {prettyName(m.products?.name)} — {m.type === "in" ? "entrada" : "saída"}
                   </div>
                   <div className="text-sm text-gray-700">
                     Qtd: <b>{m.quantity}</b>{" "}

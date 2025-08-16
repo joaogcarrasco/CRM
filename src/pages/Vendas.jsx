@@ -1,237 +1,231 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../services/supabaseClient";
 
-/**
- * Vendas (MVP):
- * - Registrar 1 item por venda (produto = gas/agua)
- * - Cria sales, sale_items e stock_movements (out)
- * - Lista vendas recentes (com itens e cliente)
- */
+// Nome bonito no frontend
+const prettyName = (n) => {
+  const v = (n || "").toLowerCase();
+  if (v === "gas") return "Gás";
+  if (v === "agua") return "Água";
+  return v.charAt(0).toUpperCase() + v.slice(1);
+};
 
 export default function Vendas() {
-  const [customers, setCustomers] = useState([]);
-  const [products, setProducts] = useState([]);
-  const [sales, setSales] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const [ok, setOk] = useState("");
 
-  // Form
-  const [customerId, setCustomerId] = useState(""); // opcional
-  const [productId, setProductId] = useState("");
-  const [quantity, setQuantity] = useState(1);
+  // selects
+  const [customers, setCustomers] = useState([]);
+  const [products, setProducts] = useState([]);
+
+  // form
+  const [customerId, setCustomerId] = useState("");
+  const [productId, setProductId] = useState(""); // começa vazio
+  const [quantity, setQuantity] = useState("");
   const [unitPrice, setUnitPrice] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState("dinheiro");
-  const [saving, setSaving] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState("");
 
-  const carregar = async () => {
+  // listagem recente
+  const [recent, setRecent] = useState([]);
+
+  async function carregar() {
     setLoading(true);
     setErr("");
+    setOk("");
 
-    const [{ data: cData, error: cErr }, { data: pData, error: pErr }] =
-      await Promise.all([
-        supabase.from("customers").select("id, name").order("name", { ascending: true }),
-        supabase.from("products").select("id, name, unit_price").order("name", { ascending: true }),
-      ]);
+    const [{ data: cData, error: cErr }, { data: pData, error: pErr }] = await Promise.all([
+      supabase.from("customers").select("id, name").order("name"),
+      supabase.from("products").select("id, name").order("name"),
+    ]);
 
-    if (cErr || pErr) setErr(cErr?.message || pErr?.message);
+    if (cErr || pErr) setErr(cErr?.message || pErr?.message || "Falha ao carregar dados.");
 
     setCustomers(cData || []);
     setProducts(pData || []);
 
-    // seleciona produto padrão
-    if (!productId && (pData?.length || 0) > 0) {
-      const gas = pData.find((p) => p.name === "gas");
-      setProductId((gas || pData[0]).id);
-      if (!unitPrice) setUnitPrice(String((gas || pData[0]).unit_price || 0));
-    }
-
-    // lista vendas recentes com itens e cliente
-    const { data: sData, error: sErr } = await supabase
-      .from("sales")
-      .select("id, total_amount, payment_method, created_at, customers(name), sale_items(quantity, unit_price, products(name))")
-      .order("created_at", { ascending: false })
-      .limit(15);
-
-    if (sErr) setErr((prev) => prev || sErr.message);
-    setSales(sData || []);
+    await carregarRecentes();
     setLoading(false);
-  };
+  }
 
-  useEffect(() => {
-    carregar();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  async function carregarRecentes() {
+    const { data, error } = await supabase
+      .from("sales")
+      .select("id, created_at, total_amount, payment_method, sale_items(quantity, unit_price, products(name))")
+      .order("created_at", { ascending: false })
+      .limit(10);
 
-  // total calculado em tela para 1 item
-  const totalCalc = (() => {
-    const q = Number(quantity) || 0;
-    const up = Number(unitPrice) || 0;
-    return (q * up).toFixed(2);
-  })();
+    if (error) setErr(error.message);
+    setRecent(data || []);
+  }
 
-  const registrarVenda = async (e) => {
+  useEffect(() => { carregar(); /* eslint-disable-next-line */ }, []);
+
+  async function registrarVenda(e) {
     e.preventDefault();
-    setSaving(true);
     setErr("");
+    setOk("");
 
-    const q = Number(quantity);
+    const q = parseInt(quantity, 10);
     const up = Number(unitPrice);
 
-    if (!productId) { setErr("Selecione um produto."); setSaving(false); return; }
-    if (!q || q <= 0) { setErr("Quantidade deve ser > 0."); setSaving(false); return; }
-    if (isNaN(up) || up < 0) { setErr("Preço unitário inválido."); setSaving(false); return; }
+    if (!productId) return setErr("Selecione um produto.");
+    if (!q || q <= 0) return setErr("Informe uma quantidade válida (> 0).");
+    if (Number.isNaN(up) || up < 0) return setErr("Informe um preço unitário válido (>= 0).");
 
-    try {
-      // 1) cria sale
-      const { data: saleIns, error: saleErr } = await supabase
-        .from("sales")
-        .insert([{
-          customer_id: customerId || null,
-          total_amount: q * up,
-          payment_method: paymentMethod
-        }])
-        .select("id")
-        .single();
+    // 1) Checagem de estoque (UX ágil)
+    const { data: stockRow, error: stockErr } = await supabase
+      .from("v_stock_summary")
+      .select("quantity")
+      .eq("product_id", productId)
+      .single();
 
-      if (saleErr) throw saleErr;
-      const saleId = saleIns.id;
-
-      // 2) cria sale_item (1 item)
-      const { error: itemErr } = await supabase
-        .from("sale_items")
-        .insert([{
-          sale_id: saleId,
-          product_id: productId,
-          quantity: q,
-          unit_price: up
-        }]);
-      if (itemErr) throw itemErr;
-
-      // 3) baixa de estoque
-      const { error: movErr } = await supabase
-        .from("stock_movements")
-        .insert([{
-          product_id: productId,
-          type: "out",
-          quantity: q,
-          unit_cost: null
-        }]);
-      if (movErr) throw movErr;
-
-      // reset do form
-      setCustomerId("");
-      setQuantity(1);
-      setSaving(false);
-
-      await carregar();
-    } catch (e2) {
-      setErr(e2.message || "Erro ao registrar venda.");
-      setSaving(false);
+    if (stockErr) {
+      setErr(stockErr.message);
+      return;
     }
-  };
+    const available = Number(stockRow?.quantity || 0);
+    if (available < q) {
+      setErr(`Estoque insuficiente. Disponível: ${available}, solicitado: ${q}.`);
+      return;
+    }
+
+    // 2) Tenta via RPC (servidor também valida)
+    const productName = products.find((p) => p.id === productId)?.name || "gas";
+    const { error: rpcErr } = await supabase.rpc("rpc_register_sale", {
+      p_customer_id: customerId || null,
+      p_product_name: productName,
+      p_quantity: q,
+      p_unit_price: up,
+      p_payment_method: paymentMethod || null,
+    });
+
+    if (rpcErr) {
+      setErr(rpcErr.message);
+      return;
+    }
+
+    setOk("Venda registrada com sucesso.");
+    limpar();
+    await carregarRecentes();
+  }
+
+  function limpar() {
+    setProductId("");
+    setQuantity("");
+    setUnitPrice("");
+    setPaymentMethod("");
+  }
 
   return (
     <div className="max-w-3xl">
-      <h1 className="text-xl font-semibold mb-4">Vendas</h1>
-
-      {/* Formulário de venda (1 item) */}
-      <form onSubmit={registrarVenda} className="bg-white border rounded p-4 grid gap-3 md:grid-cols-4 mb-6">
-        <select
-          className="border rounded px-3 py-2 md:col-span-2"
-          value={customerId}
-          onChange={(e) => setCustomerId(e.target.value)}
-        >
-          <option value="">Venda avulsa (sem cliente)</option>
-          {customers.map((c) => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
-
-        <select
-          className="border rounded px-3 py-2 md:col-span-1"
-          value={productId}
-          onChange={(e) => {
-            setProductId(e.target.value);
-            const p = products.find((pp) => pp.id === e.target.value);
-            if (p) setUnitPrice(String(p.unit_price || 0));
-          }}
-        >
-          <option value="">Produto</option>
-          {products.map((p) => (
-            <option key={p.id} value={p.id}>{p.name}</option>
-          ))}
-        </select>
-
-        <input
-          type="number"
-          min="1"
-          className="border rounded px-3 py-2 md:col-span-1"
-          placeholder="Qtd"
-          value={quantity}
-          onChange={(e) => setQuantity(e.target.value)}
-          required
-        />
-
-        <input
-          type="number"
-          step="0.01"
-          min="0"
-          className="border rounded px-3 py-2 md:col-span-1"
-          placeholder="Preço unit."
-          value={unitPrice}
-          onChange={(e) => setUnitPrice(e.target.value)}
-          required
-        />
-
-        <select
-          className="border rounded px-3 py-2 md:col-span-1"
-          value={paymentMethod}
-          onChange={(e) => setPaymentMethod(e.target.value)}
-        >
-          <option value="dinheiro">Dinheiro</option>
-          <option value="pix">PIX</option>
-          <option value="cartao">Cartão</option>
-        </select>
-
-        <div className="md:col-span-2 flex items-center text-sm text-gray-600">
-          Total: <span className="ml-2 font-semibold">R$ {totalCalc}</span>
-        </div>
-
-        <button disabled={saving} className="px-3 py-2 rounded bg-blue-600 text-white md:col-span-1">
-          {saving ? "Salvando..." : "Registrar venda"}
-        </button>
-      </form>
-
+      <h1 className="text-xl font-semibold mb-4">Registrar venda</h1>
       {err && <div className="text-red-600 mb-3">{err}</div>}
+      {ok && <div className="text-green-600 mb-3">{ok}</div>}
 
-      {/* Lista de vendas recentes */}
-      <h2 className="text-lg font-medium mb-2">Vendas recentes</h2>
       {loading ? (
         <div>Carregando…</div>
-      ) : sales.length === 0 ? (
-        <div className="text-gray-600">Nenhuma venda ainda.</div>
       ) : (
-        <ul className="space-y-2">
-          {sales.map((s) => (
-            <li key={s.id} className="bg-white border rounded p-3">
-              <div className="flex items-center justify-between">
-                <div className="font-medium">
-                  {s.customers?.name || "Avulsa"} — R$ {Number(s.total_amount).toFixed(2)}
-                </div>
-                <div className="text-xs text-gray-500">
-                  {new Date(s.created_at).toLocaleString()} • {s.payment_method || "—"}
-                </div>
-              </div>
-              <div className="text-sm text-gray-700 mt-1">
-                {s.sale_items?.map((it, idx) => (
-                  <span key={idx} className="mr-3">
-                    {it.products?.name} × {it.quantity} @ R$ {Number(it.unit_price).toFixed(2)}
-                  </span>
+        <>
+          <form onSubmit={registrarVenda} className="bg-white border rounded p-4 grid gap-3 md:grid-cols-2 mb-6">
+            <div className="md:col-span-2">
+              <label className="text-sm text-gray-600">Cliente (opcional)</label>
+              <select
+                className="border rounded px-3 py-2 w-full"
+                value={customerId}
+                onChange={(e) => setCustomerId(e.target.value)}
+              >
+                <option value="">Sem cliente</option>
+                {customers.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
-              </div>
-            </li>
-          ))}
-        </ul>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-600">Produto</label>
+              <select
+                className="border rounded px-3 py-2 w-full"
+                value={productId}
+                onChange={(e) => setProductId(e.target.value)}
+                required
+              >
+                <option value="">Selecione o produto</option>
+                {products.map((p) => (
+                  <option key={p.id} value={p.id}>{prettyName(p.name)}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-600">Quantidade</label>
+              <input
+                type="number"
+                min="1"
+                className="border rounded px-3 py-2 w-full"
+                value={quantity}
+                onChange={(e) => setQuantity(e.target.value)}
+                required
+              />
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-600">Preço unitário</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className="border rounded px-3 py-2 w-full"
+                value={unitPrice}
+                onChange={(e) => setUnitPrice(e.target.value)}
+                required
+              />
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-600">Pagamento (opcional)</label>
+              <input
+                className="border rounded px-3 py-2 w-full"
+                placeholder="Dinheiro / Pix / Cartão"
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value)}
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <button className="bg-blue-600 text-white rounded px-3 py-2">Registrar venda</button>
+            </div>
+          </form>
+
+          {/* Vendas recentes */}
+          <section>
+            <h2 className="text-lg font-medium mb-2">Últimas vendas</h2>
+            {recent.length === 0 ? (
+              <div className="text-gray-600">Nenhuma venda ainda.</div>
+            ) : (
+              <ul className="space-y-2">
+                {recent.map((s) => (
+                  <li key={s.id} className="bg-white border rounded p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-gray-600">
+                        {new Date(s.created_at).toLocaleString()}
+                        {s.payment_method ? ` • ${s.payment_method}` : ""}
+                      </div>
+                      <div className="font-semibold">R$ {Number(s.total_amount).toFixed(2)}</div>
+                    </div>
+                    <div className="text-sm text-gray-700 mt-1">
+                      {s.sale_items?.map((it, idx) => (
+                        <span key={idx}>
+                          {it.products?.name ? prettyName(it.products.name) : "Produto"} — {it.quantity} un. × R$ {Number(it.unit_price).toFixed(2)}
+                          {idx < s.sale_items.length - 1 ? " • " : ""}
+                        </span>
+                      ))}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </>
       )}
     </div>
   );
